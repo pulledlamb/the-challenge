@@ -698,6 +698,163 @@ class NeuralNetworkBaseModel(BaseModel):
             return None
         return self.mae_test[horizon]
 
+    def predict_with_uncertainty(self, x_input=None, initial_y=None, n_iter=50, plot=True, signal=True, change_horizon=5):
+        """
+        Predict with MC dropout to get mean and confidence interval, optionally with trading signals.
+        
+        Args:
+            x_input: Input data for prediction. If None, uses self.test_x[:1]
+            initial_y: Initial y values for inverse transform. If None, uses self.y0_test[:1]
+            n_iter: Number of Monte Carlo iterations
+            plot: Whether to plot the results
+            signal: Whether to generate and plot trading signals
+            change_horizon: Number of steps ahead to calculate percentage change for signals
+            
+        Returns:
+            mean_pred: Mean prediction
+            lower: Lower bound of 95% confidence interval
+            upper: Upper bound of 95% confidence interval
+            signals_df: DataFrame with trading signals (if signal=True), otherwise None
+        """
+        if not TENSORFLOW_AVAILABLE:
+            raise ImportError("TensorFlow is required for uncertainty prediction")
+            
+        if not self.is_fitted:
+            raise ValueError("Model must be fitted before making predictions")
+            
+        # Use default inputs if not provided
+        if x_input is None:
+            if self.test_x is None:
+                raise ValueError("No test data available. Call prepare_data() first.")
+            x_input = self.test_x[:1]  # Use first test sample
+            
+        if initial_y is None:
+            if self.y0_test is None:
+                raise ValueError("No test data available. Call prepare_data() first.")
+            initial_y = self.y0_test[:1]  # Use first test sample
+            
+        # Ensure initial_y has correct shape
+        if initial_y.ndim == 1:
+            initial_y = initial_y.reshape(1, -1)
+            
+        preds = []
+        for _ in range(n_iter):
+            # Activate dropout at inference by setting training=True
+            pred_norm = self.model(x_input, training=True).numpy()
+            pred_original = self.inverse_transform(pred_norm, initial_y)
+            preds.append(pred_original.flatten())
+        
+        preds = np.array(preds)
+        mean_pred = preds.mean(axis=0)
+        lower = np.percentile(preds, 2.5, axis=0)
+        upper = np.percentile(preds, 97.5, axis=0)
+
+        # Generate trading signals if requested
+        signals_df = None
+        if signal:
+            signals_df = self.generate_signals(mean_pred, change_horizon)
+
+        if plot:
+            # Create future index for plotting
+            future_index = np.arange(1, len(mean_pred) + 1)
+            
+            plt.figure(figsize=(12, 6))
+            plt.plot(future_index, mean_pred, label='Mean Prediction', color='blue', linewidth=2)
+            plt.fill_between(future_index, lower, upper, color='orange', alpha=0.3, label='95% CI')
+            
+            # Add trading signals to the plot if generated
+            if signal and signals_df is not None:
+                # Map signals to their corresponding positions in the prediction
+                signal_positions = signals_df.index + 1  # +1 because future_index starts at 1
+                
+                # Filter signals to only show those within our prediction range
+                valid_signals = signals_df[signal_positions <= len(mean_pred)]
+                valid_positions = signal_positions[signal_positions <= len(mean_pred)]
+                
+                if len(valid_signals) > 0:
+                    # Get corresponding prices for valid signal positions
+                    signal_prices = mean_pred[valid_positions - 1]  # -1 to convert back to 0-indexed
+                    
+                    # Plot long and short signals
+                    long_mask = valid_signals['signal'] == 1
+                    short_mask = valid_signals['signal'] == -1
+                    
+                    if long_mask.any():
+                        plt.scatter(valid_positions[long_mask], signal_prices[long_mask], 
+                                  marker='^', color='green', s=100, label='Long Signal', zorder=5)
+                    
+                    if short_mask.any():
+                        plt.scatter(valid_positions[short_mask], signal_prices[short_mask], 
+                                  marker='v', color='red', s=100, label='Short Signal', zorder=5)
+            
+            title_text = f'Prediction with Uncertainty (MC Dropout, {n_iter} iterations)'
+            if signal:
+                title_text += f' + Trading Signals (H+{change_horizon})'
+            
+            plt.title(title_text)
+            plt.xlabel('Forecast Horizon')
+            plt.ylabel(self.target_col)
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.show()
+            
+        return mean_pred, lower, upper, signals_df
+
+    def generate_signals(self, mean_pred, change_horizon=5):
+        """
+        Generate trading signals based on percentage change over specified horizon.
+        
+        Args:
+            mean_pred: Array of mean predictions
+            change_horizon: Number of steps ahead to calculate percentage change
+            
+        Returns:
+            signals_df: DataFrame with start_price, pct_change, and signal columns
+        """
+        signals_data = []
+        for i in range(len(mean_pred) - change_horizon):
+            start_price = mean_pred[i]
+            future_price = mean_pred[i + change_horizon]
+            pct_change = (future_price - start_price) / start_price
+            signal = 1 if pct_change > 0 else -1
+            signals_data.append((start_price, pct_change, signal))
+
+        signals_df = pd.DataFrame(signals_data, columns=["start_price", "pct_change", "signal"])
+        return signals_df
+
+    def plot_signals(self, signals_df=None, change_horizon=5):
+        """
+        Plot predictions with trading signals based on percentage change over `change_horizon` days.
+        
+        Args:
+            signals_df: DataFrame with trading signals. If None, returns without plotting
+            change_horizon: Horizon used for signal generation (for title)
+        """
+        if signals_df is None:
+            print("No signals DataFrame provided")
+            return
+        
+        plt.figure(figsize=(12, 6))
+        plt.plot(signals_df.index, signals_df['start_price'], label='Predicted Start Price', color='blue')
+
+        # Highlight long and short signals
+        long_dates = signals_df.index[signals_df['signal'] == 1]
+        short_dates = signals_df.index[signals_df['signal'] == -1]
+
+        plt.scatter(long_dates, signals_df.loc[long_dates, 'start_price'], 
+                    marker='^', color='green', s=100, label='Long Signal', zorder=5)
+        plt.scatter(short_dates, signals_df.loc[short_dates, 'start_price'], 
+                    marker='v', color='red', s=100, label='Short Signal', zorder=5)
+
+        plt.title(f"Predictions with Trading Signals (H+{change_horizon} Horizon)")
+        plt.xlabel("Date")
+        plt.ylabel("Predicted Price")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
 
 class CNNModel(NeuralNetworkBaseModel):
     """
