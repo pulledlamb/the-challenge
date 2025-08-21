@@ -26,8 +26,11 @@ sentiment_analyzer = Sentiment(
 ## Features
 - [x] Multi-Step forecasts with confidence intervals and trading signals, using CNN model;
 - [x] Sentiment anlaysis using Reddit r/forex comments and sentiment score as a predictive variable;
-- [  ] Look into if model is memorizing instead of learning;
-- [  ] Add backtesting, using predicted signals; 
+- [x] Multi-step forecasts, using LSTM model;
+- [x] Hybrid LSTM-GARCH model, using GARCH parameters as a predictive variable;
+- [o] Look into if model is memorizing instead of learning;
+- [x] Add backtesting, using predicted signals; 
+- [  ] Investigate the wiggly RMSE metric;
 - [  ] Automatically partial fit the model when new data comes in, every 2h/1d;
 
 ## Acknowledgements
